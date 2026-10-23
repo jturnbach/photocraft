@@ -2702,3 +2702,49 @@ fn hue_saturation_uses_photoshops_hue_key() {
     normalise(&mut p);
     assert_eq!(p["hue"], json!(30), "{p}");
 }
+
+/// #8530: `layer.setAdjustment` keeps every Levels setting a step doesn't name, but the event
+/// writes each input and output range as one pair. A step that gives one end of a range, in the
+/// composite or in a channel, would replay with the other end reset to 0 or 255, so strict export
+/// refuses it and a partial export skips it. Whole ranges, gamma alone and new Levels (where 0
+/// and 255 are the starting values) still export.
+#[test]
+fn a_levels_edit_that_names_one_end_of_a_range_is_refused() {
+    let one = |id: &str, p: Value| Action { name: "Probe".into(), steps: vec![(id.into(), p)], ..Default::default() };
+    for p in [
+        json!({"kind": "levels", "inBlack": 31}),
+        json!({"kind": "levels", "inWhite": 239}),
+        json!({"kind": "levels", "outBlack": 7}),
+        json!({"kind": "levels", "outWhite": 247, "inBlack": 12, "inWhite": 239}),
+        json!({"kind": "levels", "red": {"inBlack": 2}}),
+        json!({"kind": "levels", "inBlack": 31, "inWhite": 239, "blue": {"outWhite": 200}}),
+    ] {
+        let err = export("Levels", &[&one("layer.setAdjustment", p.clone())], &[], false).unwrap_err();
+        assert!(err.contains("no Photoshop equivalent") && err.contains("`layer.setAdjustment`"), "{p}: {err}");
+        let (_, skipped) = export("Levels", &[&one("layer.setAdjustment", p.clone())], &[], true).unwrap();
+        assert_eq!(skipped, vec![Skipped { action: "Probe".into(), step: 0, id: "layer.setAdjustment".into() }], "{p}");
+    }
+    for p in [
+        json!({"kind": "levels", "inBlack": 31, "inWhite": 239}),
+        json!({"kind": "levels", "gamma": 1.27}),
+        json!({"kind": "levels", "red": {"outBlack": 5, "outWhite": 250}}),
+    ] {
+        let (bytes, skipped) = export("Levels", &[&one("layer.setAdjustment", p.clone())], &[], false).unwrap();
+        assert!(skipped.is_empty(), "{p}");
+        let step = import(&bytes).unwrap().actions.remove(0).steps.remove(0);
+        assert_eq!(step.0, "layer.setAdjustment", "{p}");
+        assert_eq!(step.1["kind"], json!("levels"), "{p}");
+        for (k, v) in p.as_object().unwrap().iter().filter(|(k, _)| *k != "kind") {
+            let (got, want) = match v.as_object() {
+                Some(c) => (&step.1[k.as_str()], c.iter().map(|(ck, cv)| (ck.clone(), cv.clone())).collect()),
+                None => (&step.1, vec![(k.clone(), v.clone())]),
+            };
+            for (ck, cv) in want {
+                assert_eq!(got.get(&ck).and_then(Value::as_f64), cv.as_f64(), "{p} {k} {ck}: {}", step.1);
+            }
+        }
+    }
+    for id in ["image.adjustments.levels", "layer.newAdjustmentLayer.levels"] {
+        assert!(export("Levels", &[&one(id, json!({"inBlack": 31}))], &[], false).is_ok(), "{id}");
+    }
+}

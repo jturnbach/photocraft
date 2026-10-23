@@ -537,6 +537,14 @@ fn levels_entry(chan: Option<&str>, p: &Value) -> Descriptor {
     e
 }
 
+/// Whether a Levels edit gives one end of an input or output range without the other, in the
+/// composite or in a channel. The event writes each range as one pair, so a Set would replay the
+/// missing end as 0 or 255 instead of keeping the layer's value (#8530).
+fn levels_splits_a_range(p: &Value) -> bool {
+    let split = |e: &Value| [("inBlack", "inWhite"), ("outBlack", "outWhite")].iter().any(|(b, w)| jnum(e, b).is_some() != jnum(e, w).is_some());
+    split(p) || CHANNELS.iter().any(|(_, k)| p.get(*k).is_some_and(split))
+}
+
 fn levels_to(p: &Value) -> Option<Descriptor> {
     let mut entries = vec![D::Descriptor(levels_entry(None, p))];
     for (_, k) in CHANNELS {
@@ -1555,6 +1563,8 @@ fn set_from(d: &Descriptor) -> Mapped {
     }
 }
 
+/// The `Set` descriptor a step exports as, or `None` when the event can't carry what the step
+/// does (strict export then fails and a partial export skips the step).
 fn set_to(id: &str, p: &Value) -> Option<Descriptor> {
     let fsel = D::Reference(vec![ReferenceItem::Property { class: class("Chnl"), key: Id::new("fsel") }]);
     let sel = |t: D| desc("null").with("null", fsel.clone()).with("T   ", t);
@@ -1662,6 +1672,9 @@ fn set_to(id: &str, p: &Value) -> Option<Descriptor> {
             // The adjustment kind isn't in the params: Photoshop needs it, so only steps that
             // name one (`kind`) export.
             let a = adjustment_by_suffix(jstr(p, "kind")?)?;
+            if a.suffix == "levels" && levels_splits_a_range(p) {
+                return None;
+            }
             desc("null").with("null", target_ref("AdjL")).with("T   ", D::Descriptor((a.to)(p)?))
         }
         _ => return None,
