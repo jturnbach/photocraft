@@ -472,6 +472,11 @@ fn document_to_image_for(doc: &Document, warnings: &mut Vec<String>, cmyk_target
                     for p in &band.px[range] {
                         if cmyk {
                             let channels = photocraft_raster::from_rgba_into(&fmt, *p, &mut converted);
+                            if p[3] <= 0.0 {
+                                // Uncovered pixels are paper (no ink), not the separation of
+                                // the compositor's transparent black (#8777).
+                                converted[..4].fill(0.0);
+                            }
                             for value in converted.iter().take(channels) {
                                 put(*value);
                             }

@@ -1381,6 +1381,11 @@ fn merged_planes(doc: &Document, fmt: &PixelFormat, cmyk: bool, matte: bool, ctl
                 let mut v = [0.0f32; 5];
                 for p in &band.px[range.clone()] {
                     photocraft_raster::from_rgba_into(fmt, *p, &mut v);
+                    if cmyk && p[3] <= 0.0 {
+                        // Uncovered pixels are paper (no ink), not the separation of the
+                        // compositor's transparent black (#8777).
+                        v[..cc].fill(0.0);
+                    }
                     for c in 0..=cc {
                         // Matte against white like Photoshop (see `pixels::matte`).
                         let m = if c < cc && matte { crate::pixels::matte(v[c], v[cc], white[c]) } else { v[c] };

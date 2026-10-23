@@ -160,6 +160,29 @@ fn flat_and_layered_tiff_agree_for_mixed_cmyk_regions() {
     }
 }
 
+/// Pixels with no coverage carry paper (no ink) under the alpha, as Photoshop writes them, not
+/// the CMYK separation of the compositor's transparent black: readers that ignore the extra
+/// sample (RIPs, spot-plate workflows) would otherwise print a near-black sheet (#8777).
+#[test]
+fn tiff_writes_no_ink_under_full_transparency() {
+    for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
+        for tiff_layers in [false, true] {
+            let context = format!("{depth:?}, tiff_layers={tiff_layers}");
+            let doc = mixed_region_document(depth, false);
+            let result = export(&doc, "tiff", &ExportOptions { tiff_layers, ..Default::default() }).unwrap();
+            let image = decode(&result.bytes).unwrap();
+            assert_eq!(image.layout(), ChannelLayout::CmykA, "{context}");
+            let pixels = image.to_normalized();
+            let empty: Vec<_> = pixels.as_chunks::<5>().0.iter().enumerate().filter(|(i, _)| i % 48 >= 32).map(|(_, px)| px).collect();
+            assert!(!empty.is_empty(), "{context}");
+            for px in empty {
+                assert_eq!(px[4], 0.0, "{context}: empty region alpha");
+                assert_eq!(&px[..4], &[0.0; 4], "{context}: ink under transparency");
+            }
+        }
+    }
+}
+
 #[test]
 fn psd_keeps_cmyk_mode_depth_and_profile_when_composited() {
     for depth in [SampleType::U8, SampleType::U16, SampleType::F32] {
