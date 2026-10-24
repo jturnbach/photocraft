@@ -103,7 +103,7 @@ pub fn tool_icon(t: Tool) -> &'static str {
         Tool::Note => "message-square",
         Tool::Count => "circle-dot",
         Tool::Lasso => "lasso",
-        Tool::PolygonLasso => "pentagon",
+        Tool::PolygonLasso => "lasso-polygonal",
         Tool::MagneticLasso => "lasso-magnetic",
         Tool::MagicWand => "wand-sparkles",
         Tool::Crop => "crop",
@@ -226,6 +226,19 @@ mod tests {
         }
         assert_eq!(tool_icon(Tool::Gradient), "gradient");
         assert_ne!(tool_icon(Tool::Gradient), tool_icon(Tool::PaintBucket));
+    }
+
+    /// The Polygonal Lasso has its own glyph (#8584): it used the Polygon shape tool's pentagon,
+    /// so the two tools looked the same in the toolbar. No other tool shares it.
+    #[test]
+    fn polygonal_lasso_icon_is_its_own() {
+        let icon = tool_icon(Tool::PolygonLasso);
+        assert_eq!(icon, "lasso-polygonal");
+        assert!(exists(icon));
+        for t in Tool::ALL.into_iter().filter(|t| *t != Tool::PolygonLasso) {
+            assert_ne!(tool_icon(t), icon, "{t:?} shares the Polygonal Lasso's icon");
+        }
+        assert_ne!(tool_icon(Tool::PolygonLasso), tool_icon(Tool::Polygon));
     }
 
     #[test]
