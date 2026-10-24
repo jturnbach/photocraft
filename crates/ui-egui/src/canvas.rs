@@ -748,6 +748,18 @@ fn visible_crosshair(icon: egui::CursorIcon, painter: &egui::Painter, p: Pos2, d
     crate::tool_cursor::crosshair(painter, p, 8.0, 2.0)
 }
 
+/// Does the Pencil's square cursor (and the Pencil- or Block-mode Eraser's) show the crosshair at
+/// the pointer as well? With Show Crosshair in Brush Tip, always. Without it, when the square is
+/// too small to see where it is, and when a document pixel is so large on screen that the square,
+/// which moves a whole pixel at a time, no longer follows the pointer: past 1200 % on a 2× display
+/// the pointer was otherwise nowhere to be seen (#6500). `square` is the square's width and `zoom`
+/// the points per document pixel.
+pub(crate) fn pencil_cursor_crosshair(show_in_tip: bool, square: f32, zoom: f32) -> bool {
+    /// Below this many points an outline (or a step of the grid) is too small to read.
+    const VISIBLE: f32 = 6.0;
+    show_in_tip || square < VISIBLE || zoom >= VISIBLE
+}
+
 /// The Pencil's cursor at `doc` (document pixels): the whole-pixel square its dab fills
 /// (`paint::grid_square`), in screen points with its edges on physical pixels (`ppp` = pixels
 /// per point), so it lines up with the pixel grid at any zoom.
@@ -4703,8 +4715,7 @@ pub fn canvas_view(app: &mut PhotocraftApp, ui: &mut egui::Ui, idx: usize, rect:
                                     painter.rect_stroke(sq, 0.0, dark, egui::StrokeKind::Outside);
                                     painter.rect_stroke(sq, 0.0, light, egui::StrokeKind::Inside);
                                 }
-                                // Too small to see where it is: the hotspot as well.
-                                if cur.show_crosshair_in_brush_tip || sq.width() < 6.0 {
+                                if pencil_cursor_crosshair(cur.show_crosshair_in_brush_tip, sq.width(), xf.zoom) {
                                     crate::tool_cursor::crosshair(&painter, p, 4.0, 0.0);
                                 }
                                 egui::CursorIcon::None

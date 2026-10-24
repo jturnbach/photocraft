@@ -6,7 +6,7 @@ use egui_kittest::Harness;
 use serde_json::json;
 
 use crate::PhotocraftApp;
-use crate::canvas::{ToolEvent, ViewXform, pencil_cursor_rect, pencil_tip_is_round, tool_event};
+use crate::canvas::{ToolEvent, ViewXform, pencil_cursor_crosshair, pencil_cursor_rect, pencil_tip_is_round, tool_event};
 use crate::state::Tool;
 
 fn app() -> PhotocraftApp {
@@ -296,4 +296,80 @@ fn b_cycles_brush_pencil_mixer_brush_and_color_replacement() {
     assert_eq!(h.state().ui.tool, Tool::ColorReplacement);
     assert_eq!(Tool::from_name("pencil"), Some(Tool::Pencil));
     assert_eq!(Tool::from_name("mixerBrush"), Some(Tool::MixerBrush));
+}
+
+/// The real canvas with the Pencil at `size` px, the view at `zoom` points per document pixel and
+/// the pointer hovering its centre, for the cursor tests below.
+fn cursor_harness(size: f32, zoom: f32) -> Harness<'static, PhotocraftApp> {
+    let mut app = app();
+    app.run("tools.setBrush", json!({"brush": {"size": size}})).unwrap();
+    app.sync_views();
+    app.ui.extras.rulers = false;
+    let mut h = Harness::builder().with_size(vec2(900.0, 600.0)).build_ui_state(
+        |ui, app: &mut PhotocraftApp| {
+            let ctx = ui.ctx().clone();
+            if !ctx.fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                return;
+            }
+            egui::CentralPanel::default().show(ui, |ui| crate::canvas::document_area(app, ui));
+        },
+        app,
+    );
+    PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::ALL[0]);
+    h.run_steps(4);
+    let v = &mut h.state_mut().ui.views[0];
+    v.zoom = zoom;
+    v.center = [60.3, 40.3];
+    v.fit_pending = false;
+    h.run_steps(2);
+    let p = h.state().last_canvas_rect.center();
+    h.event(egui::Event::PointerMoved(p));
+    h.run_steps(3);
+    h
+}
+
+/// What the cursor path draws in a frame: the cursor icon, the OS cursor bitmap's size and the
+/// shapes painted on the canvas.
+fn cursor_drawn(h: &Harness<'_, PhotocraftApp>) -> (egui::CursorIcon, Option<[u16; 2]>, Vec<egui::epaint::ClippedShape>) {
+    let out = h.output();
+    (out.platform_output.cursor_icon, out.platform_output.cursor_image.as_ref().map(|i| i.size), out.shapes.clone())
+}
+
+/// The Pencil's cursor with Show Crosshair in Brush Tip set to `on`.
+fn cursor_with_crosshair_pref(h: &mut Harness<'_, PhotocraftApp>, on: bool) -> (egui::CursorIcon, Option<[u16; 2]>, Vec<egui::epaint::ClippedShape>) {
+    h.state_mut().run("prefs.set", json!({"path": "cursors.showCrosshairInBrushTip", "value": on})).unwrap();
+    h.run_steps(2);
+    cursor_drawn(h)
+}
+
+/// #6500: zoomed in so far that the 1 px Pencil's square is 6 points or more (1200 % on a 2×
+/// display), the canvas showed only that square, which steps a whole document pixel at a time, and
+/// the pointer itself was nowhere to be seen. The crosshair now shows there as if Show Crosshair in
+/// Brush Tip were on; at 100 % a large Pencil still draws just its square unless the preference
+/// asks for the crosshair.
+#[test]
+fn zoomed_in_pencil_cursor_keeps_the_crosshair() {
+    for zoom in [6.0, 12.0, 32.0] {
+        let mut h = cursor_harness(1.0, zoom);
+        let off = cursor_with_crosshair_pref(&mut h, false);
+        let on = cursor_with_crosshair_pref(&mut h, true);
+        assert_eq!(off, on, "zoom {zoom}: the crosshair shows without the preference");
+    }
+    let mut h = cursor_harness(30.0, 1.0);
+    let off = cursor_with_crosshair_pref(&mut h, false);
+    let on = cursor_with_crosshair_pref(&mut h, true);
+    assert_ne!(off, on, "a 30 px square at 100 % follows the pointer: the preference decides");
+}
+
+/// When the Pencil's square cursor adds the crosshair (#6500): always with the preference, for a
+/// square under 6 points, and once a document pixel is 6 points or more on screen.
+#[test]
+fn pencil_cursor_crosshair_rules() {
+    assert!(pencil_cursor_crosshair(true, 40.0, 1.0));
+    assert!(pencil_cursor_crosshair(false, 4.0, 4.0), "a tiny square");
+    assert!(!pencil_cursor_crosshair(false, 30.0, 1.0), "a large square at 100 %");
+    assert!(!pencil_cursor_crosshair(false, 15.0, 3.0), "300 %: the square still tracks the pointer");
+    assert!(pencil_cursor_crosshair(false, 6.0, 6.0), "1 px at 1200 % on a 2× display");
+    assert!(pencil_cursor_crosshair(false, 120.0, 12.0), "a 10 px Pencil at 1200 %");
+    assert!(!pencil_cursor_crosshair(false, f32::NAN, f32::NAN), "hostile numbers don't panic");
 }
