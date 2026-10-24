@@ -1320,3 +1320,69 @@ fn brush_and_pencil_paint_a_cmyk_pick_with_the_picked_inks() {
         assert!(got.iter().zip(cyan).all(|(a, b)| (a - b).abs() < 0.02), "{cmd}: {got:?}");
     }
 }
+
+/// Pattern Preview (#8883): with `"wrap": true` a Brush, Eraser or Pencil stroke that runs past the
+/// right and bottom edges comes back in at the left and top, so the document tiles seamlessly;
+/// without it nothing appears on the opposite side.
+#[test]
+fn wrapped_stroke_comes_back_at_the_opposite_edges() {
+    for cmd in ["paint.stroke", "paint.pencil"] {
+        for wrap in [false, true] {
+            let mut s = session(64, 48);
+            s.execute(cmd, json!({"points": [[56, 20], [72, 20]], "size": 6, "hardness": 1, "color": "#ff0000", "wrap": wrap})).unwrap();
+            s.execute(cmd, json!({"points": [[30, 44], [30, 54]], "size": 6, "hardness": 1, "color": "#0000ff", "wrap": wrap})).unwrap();
+            assert_eq!(rgba(&s, 60, 20), [1.0, 0.0, 0.0, 1.0], "{cmd}: the stroke inside the document");
+            let (left, top) = (rgba(&s, 4, 20), rgba(&s, 30, 3));
+            if wrap {
+                assert_eq!(left, [1.0, 0.0, 0.0, 1.0], "{cmd}: past the right edge it comes back at the left");
+                assert_eq!(top, [0.0, 0.0, 1.0, 1.0], "{cmd}: past the bottom edge it comes back at the top");
+            } else {
+                assert_eq!((left[3], top[3]), (0.0, 0.0), "{cmd}: an ordinary stroke stops at the edge");
+            }
+            assert_eq!(rgba(&s, 30, 20)[3], 0.0, "{cmd}: the middle stays untouched");
+        }
+    }
+    // The Eraser wraps too.
+    let mut s = session(64, 48);
+    s.execute("edit.fill", json!({"contents": "black"})).unwrap();
+    s.execute("paint.stroke", json!({"points": [[-6, 10], [6, 10]], "size": 6, "hardness": 1, "erase": true, "wrap": true})).unwrap();
+    assert_eq!((rgba(&s, 2, 10)[3], rgba(&s, 61, 10)[3]), (0.0, 0.0), "erased at both edges");
+    assert_eq!(rgba(&s, 30, 10)[3], 1.0);
+}
+
+/// Where a soft, translucent wrapped stroke meets its own copy at a seam the stronger coverage
+/// wins, so the stroke's opacity applies once (#8883): a stroke longer than the document is as
+/// strong where it overlaps itself as anywhere else along it.
+#[test]
+fn wrapped_stroke_overlapping_itself_applies_opacity_once() {
+    let mut s = session(40, 20);
+    s.execute("paint.stroke", json!({"points": [[-10, 10], [55, 10]], "size": 6, "hardness": 1, "opacity": 0.5, "color": "#000000", "wrap": true})).unwrap();
+    let a = rgba(&s, 20, 10)[3];
+    assert!((a - 0.5).abs() < 0.02, "half opacity, not built up by the overlap: {a}");
+    assert!((0..40).all(|x| (rgba(&s, x, 10)[3] - a).abs() < 0.02), "even all the way round");
+}
+
+/// The live preview of a wrapped stroke (#8883) shows exactly the pixels its commit writes, also
+/// with smoothing (whose catch-up tail is redrawn on every step), and its bounds lie inside the
+/// document.
+#[test]
+fn live_wrapped_stroke_matches_its_commit() {
+    for smoothing in [0.0, 0.6] {
+        let mut s = session(96, 64);
+        let pts = [[80.0, 30.0, 1.0], [100.0, 34.0, 0.8], [118.0, 70.0, 1.0], [70.0, 74.0, 0.9], [40.0, 60.0, 1.0]];
+        let p = json!({"points": [pts[0]], "size": 14, "hardness": 0.3, "opacity": 0.8, "flow": 0.6, "smoothing": smoothing, "color": "#2060c0", "wrap": true});
+        let mut live = LiveStroke::begin(&s, &p).unwrap();
+        for q in &pts[1..] {
+            live.push(&[StrokePoint::new(q[0], q[1], q[2] as f32)]).unwrap();
+        }
+        let bounds = live.bounds();
+        assert!(Rect::new(0, 0, 96, 64).contains_rect(&bounds), "bounds inside the document: {bounds:?}");
+        let mut commit = p.clone();
+        commit["points"] = json!(pts);
+        commit["seed"] = json!(live.seed);
+        let shown = live.doc.layer(s.active().unwrap().active_layer.unwrap()).unwrap().surface().unwrap().clone();
+        s.execute("paint.stroke", commit).unwrap();
+        assert!(same_pixels(&shown, &surface(&s), Rect::new(0, 0, 96, 64)), "smoothing {smoothing}: preview = commit");
+        assert!((0..12).any(|y| (0..40).any(|x| surface(&s).rgba(x, y)[3] > 0.1)), "smoothing {smoothing}: the wrapped part shows at the top left");
+    }
+}

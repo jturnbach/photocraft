@@ -285,6 +285,7 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
     // instead of rendering the whole stroke again (the hitch at pen-up).
     let live = s.live_commit.take().filter(|l| l.matches(s, cmd, p, &pts));
     let from_live = live.is_some();
+    let wrap = flag(p, "wrap", false);
     let dmg = photocraft_color::convert::with_cmyk_space(cmyk.as_ref(), || {
         s.edit(label, |doc, _| {
             if let Some(l) = live {
@@ -293,6 +294,7 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
                 return Ok(l.bounds);
             }
             let sel = doc.selection.clone();
+            let tile = doc.bounds();
             let (surf, lock) = crate::channel_cmds::target_surface(doc, id, p)?;
             let mut brush = brush;
             erase_locked(&mut brush, lock, bg);
@@ -320,6 +322,8 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
                     original.finish();
                     original.composite_union_many(&copies, &pre, surf, sel.as_ref(), lock)
                 }
+            } else if wrap {
+                render_wrapped(surf, &brush, &pts, sel.as_ref(), lock, zoom, tile)
             } else {
                 render_stroke(surf, &brush, &pts, sel.as_ref(), lock, zoom)
             };
@@ -331,6 +335,19 @@ fn stroke_with(s: &mut Session, cmd: &str, p: &Value, label: &str, brush: BrushS
         r["fromLive"] = json!(true);
     }
     Ok(r)
+}
+
+/// Render a whole stroke wrapped around the edges of the document `tile` (View › Pattern Preview,
+/// #8883): what the stroke paints past one edge comes back in at the opposite one.
+fn render_wrapped(surf: &mut Surface, brush: &BrushSettings, pts: &[StrokePoint], sel: Option<&Surface>, lock: bool, zoom: f32, tile: Rect) -> Rect {
+    if pts.is_empty() {
+        return Rect::EMPTY;
+    }
+    let pre = surf.clone();
+    let mut renderer = StrokeRenderer::new(brush, Some(surf.format()), zoom);
+    renderer.push(pts);
+    renderer.finish();
+    renderer.composite_wrapped(tile, &pre, surf, sel, lock)
 }
 
 /// Pencil Auto Erase: a stroke that starts on a pixel of the foreground colour paints the
@@ -455,6 +472,9 @@ pub struct LiveStroke {
     points: Vec<StrokePoint>,
     /// The document and revision the stroke started on.
     base: (photocraft_doc::DocId, u64),
+    /// The document's bounds when the stroke wraps around its edges (`"wrap": true`, View ›
+    /// Pattern Preview, #8883), and the wrapped coverage tiles its smoothing tail drew last.
+    wrap: Option<(Rect, std::collections::HashSet<(i32, i32)>)>,
 }
 
 /// A finished live stroke offered to its own commit ([`Session::offer_live_stroke`],
@@ -526,6 +546,8 @@ impl LiveStroke {
         let mirrors: Vec<_> = (0..symmetry.as_ref().map_or(0, |s| s.mirror_count())).map(|_| StrokeRenderer::new(&brush, Some(surf.format()), zoom)).collect();
         let mirror_distinct = vec![false; mirrors.len()];
         let pre = surf.clone();
+        // Painting Symmetry keeps its own passes and does not wrap, as in the commit.
+        let wrap = (flag(p, "wrap", false) && symmetry.is_none()).then(|| (doc.bounds(), std::collections::HashSet::new()));
         let mut live = Self {
             doc: std::sync::Arc::new(doc),
             seed,
@@ -544,6 +566,7 @@ impl LiveStroke {
             cmyk: doc_cmyk_space(s),
             points: Vec::new(),
             base,
+            wrap,
         };
         live.push(&pts)?;
         Ok(live)
@@ -559,6 +582,9 @@ impl LiveStroke {
     /// Everything the stroke has touched so far.
     pub fn bounds(&self) -> Rect {
         let bounds = self.renderer.bounds().union(&self.tail);
+        if let Some((tile, _)) = &self.wrap {
+            return photocraft_paint::wrapped_bounds(bounds, *tile);
+        }
         self.mirrors.iter().zip(&self.mirror_distinct).filter(|(_, distinct)| **distinct).fold(bounds, |b, (r, _)| b.union(&r.bounds()))
     }
 
@@ -613,6 +639,12 @@ impl LiveStroke {
                 dmg = dmg.union(&StrokeRenderer::composite_union_live(&mut renderers, &mut live, full, &self.pre, surf, self.sel.as_ref(), self.lock));
                 self.tail = old.union(&live.bounds());
                 self.union_live = Some((live, passes));
+                return Ok(dmg);
+            }
+            if let Some((tile, tail_keys)) = &mut self.wrap {
+                // Pattern Preview: the stroke wraps around the document's edges (#8883).
+                let (dmg, finished) = self.renderer.composite_wrapped_live(*tile, tail_keys, &self.pre, surf, self.sel.as_ref(), self.lock);
+                self.tail = finished;
                 return Ok(dmg);
             }
             let mut dmg = Rect::EMPTY;
@@ -1195,7 +1227,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "paint.pencil",
             "Pencil",
-            r##"{"points":[[x,y,pressure?,tiltX?,tiltY?,rotation?,timeMs?,wheel?],…],"brush":{…}?,"preset":name?,"size":0.5..5000 px?,"opacity":0..1?,"color":"#rrggbb"?=foreground,"mode":"normal|multiply|screen|…|clear (erases with this brush)"="normal","erase":bool?,"block":bool=false (a hard 16×16 screen-px square, 16/zoom doc px; size, opacity, flow, hardness and dynamics ignored: the Eraser's Block mode),"zoom":view zoom=1,"autoErase":bool=false,"seed":u64?,"target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target}"##,
+            r##"{"points":[[x,y,pressure?,tiltX?,tiltY?,rotation?,timeMs?,wheel?],…],"brush":{…}?,"preset":name?,"size":0.5..5000 px?,"opacity":0..1?,"color":"#rrggbb"?=foreground,"mode":"normal|multiply|screen|…|clear (erases with this brush)"="normal","erase":bool?,"block":bool=false (a hard 16×16 screen-px square, 16/zoom doc px; size, opacity, flow, hardness and dynamics ignored: the Eraser's Block mode),"zoom":view zoom=1,"autoErase":bool=false,"seed":u64?,"wrap":bool=false (wrap the stroke around the document edges for Pattern Preview),"target":"pixels"|"mask"|"quickMask"|{"channel":i}=Channels panel target}"##,
             has_paintable,
             pencil,
             true

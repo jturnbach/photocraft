@@ -566,6 +566,115 @@ impl CoverageMap {
             self.dirty.insert(key);
         }
     }
+
+    /// This coverage folded into the repeating `tile` (View › Pattern Preview, #8883): every
+    /// pixel moves by whole tile widths and heights into `tile`, and where several images of the
+    /// stroke land on one pixel the strongest wins, as for symmetry passes ([`union_max`](Self::union_max)).
+    /// `tail`'s copy of a tile is read where it has one (see [`finished_subset`](Self::finished_subset)).
+    /// With `only`, just those destination tiles are built.
+    fn folded(&self, tail: Option<&Self>, tile: Rect, only: Option<&HashSet<(i32, i32)>>) -> Self {
+        let mut out = Self { nc: self.nc, ..Default::default() };
+        if tile.is_empty() {
+            return out;
+        }
+        let (w, h) = (i64::from(tile.width()), i64::from(tile.height()));
+        let keys: HashSet<(i32, i32)> = self.tiles.keys().chain(tail.iter().flat_map(|t| t.tiles.keys())).copied().collect();
+        let tile_area = (COV_TILE * COV_TILE) as usize;
+        for key in keys {
+            let Some(src) = tail.and_then(|t| t.tiles.get(&key)).or_else(|| self.tiles.get(&key)) else { continue };
+            let src_rect = cov_tile_rect(key);
+            if let Some(only) = only
+                && !wrapped_keys(src_rect, tile).iter().any(|k| only.contains(k))
+            {
+                continue;
+            }
+            for y in src_rect.y0..src_rect.y1 {
+                let wy = (i64::from(tile.y0) + (i64::from(y) - i64::from(tile.y0)).rem_euclid(h)) as i32;
+                for x in src_rect.x0..src_rect.x1 {
+                    let ti = ((y - src_rect.y0) * COV_TILE + (x - src_rect.x0)) as usize;
+                    let c = src.cov.get(ti).copied().unwrap_or(0.0);
+                    if c <= 0.0 {
+                        continue;
+                    }
+                    let wx = (i64::from(tile.x0) + (i64::from(x) - i64::from(tile.x0)).rem_euclid(w)) as i32;
+                    let dk = (wx.div_euclid(COV_TILE), wy.div_euclid(COV_TILE));
+                    if only.is_some_and(|o| !o.contains(&dk)) {
+                        continue;
+                    }
+                    let dst = out.tiles.entry(dk).or_insert_with(|| CovTile { cov: vec![0.0; tile_area], depth: Vec::new(), col: Vec::new() });
+                    let di = ((wy - dk.1 * COV_TILE) * COV_TILE + (wx - dk.0 * COV_TILE)) as usize;
+                    if let Some(d) = src.depth.get(ti) {
+                        if dst.depth.is_empty() {
+                            dst.depth = vec![0.0; tile_area];
+                        }
+                        if let Some(slot) = dst.depth.get_mut(di) {
+                            *slot = slot.max(*d);
+                        }
+                    }
+                    let Some(slot) = dst.cov.get_mut(di) else { continue };
+                    if c <= *slot {
+                        continue;
+                    }
+                    *slot = c;
+                    let (start, end) = (ti * self.nc, (ti + 1) * self.nc);
+                    if let Some(col) = src.col.get(start..end) {
+                        if dst.col.is_empty() {
+                            dst.col = vec![0.0; tile_area * self.nc];
+                        }
+                        if let Some(d) = dst.col.get_mut(di * self.nc..(di + 1) * self.nc) {
+                            d.copy_from_slice(col);
+                        }
+                    }
+                }
+            }
+        }
+        out.bounds = out.tiles.keys().fold(Rect::EMPTY, |b, k| b.union(&cov_tile_rect(*k))).intersect(&tile);
+        out
+    }
+}
+
+/// The pixels of coverage tile `key`.
+fn cov_tile_rect((tx, ty): (i32, i32)) -> Rect {
+    Rect::new(tx * COV_TILE, ty * COV_TILE, (tx + 1) * COV_TILE, (ty + 1) * COV_TILE)
+}
+
+/// `r` moved by whole widths and heights of the repeating `tile` into it: at most four rectangles
+/// (Pattern Preview, #8883). A rectangle as wide or tall as `tile` covers it along that axis.
+pub fn wrapped_rects(r: Rect, tile: Rect) -> Vec<Rect> {
+    if r.is_empty() || tile.is_empty() {
+        return Vec::new();
+    }
+    let axis = |a: i32, b: i32, lo: i32, hi: i32| -> Vec<(i32, i32)> {
+        let period = i64::from(hi) - i64::from(lo);
+        let length = i64::from(b) - i64::from(a);
+        if length >= period {
+            return vec![(lo, hi)];
+        }
+        let start = i64::from(lo) + (i64::from(a) - i64::from(lo)).rem_euclid(period);
+        let end = start + length;
+        if end <= i64::from(hi) { vec![(start as i32, end as i32)] } else { vec![(start as i32, hi), (lo, (i64::from(lo) + end - i64::from(hi)) as i32)] }
+    };
+    let xs = axis(r.x0, r.x1, tile.x0, tile.x1);
+    let ys = axis(r.y0, r.y1, tile.y0, tile.y1);
+    ys.into_iter().flat_map(|(y0, y1)| xs.iter().map(move |&(x0, x1)| Rect::new(x0, y0, x1, y1))).collect()
+}
+
+/// One rectangle holding everything [`wrapped_rects`] gives for `r`.
+pub fn wrapped_bounds(r: Rect, tile: Rect) -> Rect {
+    wrapped_rects(r, tile).iter().fold(Rect::EMPTY, |a, b| a.union(b))
+}
+
+/// The coverage tiles `r` lands on once wrapped into `tile` (see [`wrapped_rects`]).
+fn wrapped_keys(r: Rect, tile: Rect) -> Vec<(i32, i32)> {
+    let mut keys = Vec::new();
+    for w in wrapped_rects(r, tile) {
+        for ty in w.y0.div_euclid(COV_TILE)..=(w.y1 - 1).div_euclid(COV_TILE) {
+            for tx in w.x0.div_euclid(COV_TILE)..=(w.x1 - 1).div_euclid(COV_TILE) {
+                keys.push((tx, ty));
+            }
+        }
+    }
+    keys
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +837,76 @@ impl StrokeRenderer {
         live.tail_keys = tail_keys;
         live.bounds = after;
         dmg
+    }
+
+    /// This stroke (with `tail`'s tiles where it has them) folded into the repeating `tile`, as a
+    /// renderer whose `composite` paints it; with `only`, just those destination tiles.
+    fn folded(&self, tail: Option<&Self>, tile: Rect, only: Option<&HashSet<(i32, i32)>>) -> Self {
+        Self {
+            ctx: self.ctx.clone(),
+            generator: self.generator.clone(),
+            cov: self.cov.folded(tail.map(|t| &t.cov), tile, only),
+            dual: self.dual.as_ref().map(|d| d.folded(tail.and_then(|t| t.dual.as_ref()), tile, only)),
+            fmt: self.fmt,
+            per_dab_color: self.per_dab_color,
+            dabs_done: self.dabs_done,
+            scratch: Vec::new(),
+            depth_scratch: Vec::new(),
+            dab_buf: Vec::new(),
+            dual_buf: Vec::new(),
+            all_dabs: None,
+        }
+    }
+
+    /// Composite the stroke wrapped around the edges of `tile` (the document, while View ›
+    /// Pattern Preview shows it repeated, #8883): what leaves one edge comes back in at the
+    /// opposite one, so the painted document tiles seamlessly. Where the stroke meets its own
+    /// wrapped copy the stronger coverage wins, so opacity applies once. Returns the damaged
+    /// rectangle (inside `tile`).
+    pub fn composite_wrapped(&self, tile: Rect, pre: &Surface, target: &mut Surface, selection: Option<&Surface>, lock_transparency: bool) -> Rect {
+        self.folded(None, tile, None).composite(pre, target, selection, lock_transparency, true)
+    }
+
+    /// Live preview of [`composite_wrapped`](Self::composite_wrapped): leaves `target` as finishing
+    /// the stroke now and compositing it wrapped would, redrawing only the document tiles that the
+    /// new dabs and the smoothing tail (now and in the previous call, kept in `tail_keys`) land on.
+    /// Returns the damaged rectangle and the bounds of the finished stroke before wrapping.
+    pub fn composite_wrapped_live(
+        &mut self,
+        tile: Rect,
+        tail_keys: &mut HashSet<(i32, i32)>,
+        pre: &Surface,
+        target: &mut Surface,
+        selection: Option<&Surface>,
+        lock_transparency: bool,
+    ) -> (Rect, Rect) {
+        let mut changed = HashSet::new();
+        self.drain_dirty_into(&mut changed);
+        let tail = self.tail_preview();
+        let mut tail_src = HashSet::new();
+        if let Some(t) = &tail {
+            t.keys_into(&mut tail_src);
+        }
+        let finished = tail.as_ref().map_or(self.bounds(), |t| t.bounds());
+        let wrap = |keys: &HashSet<(i32, i32)>| keys.iter().flat_map(|k| wrapped_keys(cov_tile_rect(*k), tile)).collect::<HashSet<_>>();
+        let new_tail = wrap(&tail_src);
+        let mut dest = std::mem::take(tail_keys);
+        dest.extend(wrap(&changed));
+        dest.extend(&new_tail);
+        let mut dmg = Rect::EMPTY;
+        let mut region = Vec::new();
+        // Back to the pre-stroke pixels first: a tile the tail left no longer has its coverage.
+        for k in &dest {
+            let r = cov_tile_rect(*k).intersect(&tile);
+            if !r.is_empty() {
+                pre.read_region_into(r, &mut region);
+                target.write_region(r, &region);
+                dmg = dmg.union(&r);
+            }
+        }
+        self.folded(tail.as_ref(), tile, Some(&dest)).composite(pre, target, selection, lock_transparency, true);
+        *tail_keys = new_tail;
+        (dmg, finished)
     }
     /// `fmt` = target pixel format (needed for per-dab colour); `zoom` for smoothing.
     pub fn new(brush: &BrushSettings, fmt: Option<PixelFormat>, zoom: f32) -> Self {

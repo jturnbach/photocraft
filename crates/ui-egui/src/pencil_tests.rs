@@ -297,3 +297,28 @@ fn b_cycles_brush_pencil_mixer_brush_and_color_replacement() {
     assert_eq!(Tool::from_name("pencil"), Some(Tool::Pencil));
     assert_eq!(Tool::from_name("mixerBrush"), Some(Tool::MixerBrush));
 }
+
+/// View › Pattern Preview (#8883): a Pencil or Brush stroke dragged past the right edge of the
+/// document comes back in at the left, both in the live preview the canvas shows and in the
+/// commit, so the document tiles seamlessly; with Pattern Preview off it stops at the edge.
+#[test]
+fn pattern_preview_wraps_pencil_and_brush_strokes_across_the_edge() {
+    for tool in [Tool::Pencil, Tool::Brush] {
+        for pattern_preview in [false, true] {
+            let mut app = app();
+            app.ui.tool = tool;
+            crate::paint_mouse::sync_tool_brush(&mut app);
+            app.run("tools.setBrush", json!({"brush": {"size": 6, "hardness": 1.0, "smoothing": {"amount": 0.0}}})).unwrap();
+            app.ui.view.pattern_preview = pattern_preview;
+            drag(&mut app, &[(110.0, 40.0), (126.0, 40.0)], Modifiers::NONE);
+            assert!(!app.ui.status_error, "{tool:?}: {}", app.ui.status);
+            assert_eq!(rgba(&app, 115, 40)[3], 1.0, "{tool:?}: inside the document");
+            let wrapped = rgba(&app, 3, 40)[3];
+            if pattern_preview {
+                assert_eq!(wrapped, 1.0, "{tool:?}: Pattern Preview wraps the stroke to the left edge");
+            } else {
+                assert_eq!(wrapped, 0.0, "{tool:?}: an ordinary stroke stops at the right edge");
+            }
+        }
+    }
+}

@@ -693,6 +693,10 @@ fn stroke_params(app: &PhotocraftApp, d: &Drag, points: &[Vec<f64>]) -> serde_js
     if crate::eraser_ui::block_mode(app, tool) {
         p["block"] = json!(true);
     }
+    // View › Pattern Preview: the stroke wraps around the document's edges (#8883).
+    if app.ui.view.pattern_preview {
+        p["wrap"] = json!(true);
+    }
     p
 }
 
