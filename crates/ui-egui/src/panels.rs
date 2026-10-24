@@ -3455,13 +3455,20 @@ fn layer_thumb_fit(cell: Rect, w: u32, h: u32) -> (Rect, Rect) {
     crate::channels_panel::fit_thumb(cell, w, h)
 }
 
+/// Paint the Layers panel thumbnail of `l` in `rect`: a glyph tile for groups and adjustment
+/// layers (one glyph per adjustment kind), a "T" tile for type, the fill for fill layers, and the
+/// pixel thumbnail for everything else.
 fn draw_layer_thumb(app: &mut PhotocraftApp, ctx: &egui::Context, ui: &egui::Ui, doc: &photocraft_doc::Document, l: &Layer, rect: Rect, selected: bool) {
     let t = Tokens::get(ctx);
     let p = ui.painter();
     match &l.content {
         LayerContent::Adjustment(_) | LayerContent::Group(_) => {
             p.rect_filled(rect, 6.0, t.field);
-            let icon = if l.is_group() { "folder" } else { "contrast" };
+            let icon = match &l.content {
+                // Photoshop tells adjustment kinds apart by their thumbnail glyph (#9038).
+                LayerContent::Adjustment(a) => adjustment_icon(photocraft_engine::commands::adjustment_kind(a)),
+                _ => "folder",
+            };
             icons::paint(ui, rect, icon, 18.0, t.icon);
         }
         LayerContent::Text(_) => {
@@ -4038,34 +4045,60 @@ fn properties_body_inner(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The glyph for an adjustment kind (an `adjustment_kind` id), shared by the Adjustments panel
+/// buttons and the Layers panel thumbnails so each kind reads the same in both (#9038). Kinds
+/// without a button of their own (an unsupported PSD adjustment) keep the generic half-filled
+/// circle.
+pub(crate) fn adjustment_icon(kind: &str) -> &'static str {
+    match kind {
+        "brightnessContrast" => "sun",
+        "levels" => "gauge",
+        "curves" => "pen-tool",
+        "exposure" => "scan",
+        "vibrance" => "sparkles",
+        "hueSaturation" => "droplet",
+        "colorBalance" => "blend",
+        "blackWhite" => "contrast",
+        "photoFilter" => "circle-dot",
+        "channelMixer" => "sliders-horizontal",
+        "invert" => "squares-subtract",
+        "posterize" => "layers",
+        "threshold" => "square",
+        "gradientMap" => "palette",
+        "selectiveColor" => "swatch-book",
+        "colorLookup" => "grid-3x3",
+        _ => "adjustment-layer",
+    }
+}
+
 /// Photoshop's Adjustments panel: a grid of one-click adjustment layers.
 fn adjustments_grid(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     ui.label(RichText::new(tl!("Add an adjustment")).color(t.text_dim));
     ui.add_space(4.0);
-    let items: [(&str, &str, &str); 16] = [
-        ("brightnessContrast", "sun", tl!("Brightness/Contrast")),
-        ("levels", "gauge", tl!("Levels")),
-        ("curves", "pen-tool", tl!("Curves")),
-        ("exposure", "scan", tl!("Exposure")),
-        ("vibrance", "sparkles", tl!("Vibrance")),
-        ("hueSaturation", "droplet", tl!("Hue/Saturation")),
-        ("colorBalance", "blend", tl!("Color Balance")),
-        ("blackWhite", "contrast", tl!("Black & White")),
-        ("photoFilter", "circle-dot", tl!("Photo Filter")),
-        ("channelMixer", "sliders-horizontal", tl!("Channel Mixer")),
-        ("invert", "squares-subtract", tl!("Invert")),
-        ("posterize", "layers", tl!("Posterize")),
-        ("threshold", "square", tl!("Threshold")),
-        ("gradientMap", "palette", tl!("Gradient Map")),
-        ("selectiveColor", "swatch-book", tl!("Selective Color")),
-        ("colorLookup", "grid-3x3", tl!("Color Lookup")),
+    let items: [(&str, &str); 16] = [
+        ("brightnessContrast", tl!("Brightness/Contrast")),
+        ("levels", tl!("Levels")),
+        ("curves", tl!("Curves")),
+        ("exposure", tl!("Exposure")),
+        ("vibrance", tl!("Vibrance")),
+        ("hueSaturation", tl!("Hue/Saturation")),
+        ("colorBalance", tl!("Color Balance")),
+        ("blackWhite", tl!("Black & White")),
+        ("photoFilter", tl!("Photo Filter")),
+        ("channelMixer", tl!("Channel Mixer")),
+        ("invert", tl!("Invert")),
+        ("posterize", tl!("Posterize")),
+        ("threshold", tl!("Threshold")),
+        ("gradientMap", tl!("Gradient Map")),
+        ("selectiveColor", tl!("Selective Color")),
+        ("colorLookup", tl!("Color Lookup")),
     ];
     let mut run = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
-        for (kind, icon, tip) in items {
-            if icons::button(ui, icon, 30.0, false, tip).clicked() {
+        for (kind, tip) in items {
+            if icons::button(ui, adjustment_icon(kind), 30.0, false, tip).clicked() {
                 run = Some(format!("layer.newAdjustmentLayer.{kind}"));
             }
         }
@@ -5835,6 +5868,10 @@ mod fx_drag_tests;
 #[cfg(test)]
 #[path = "unsupported_marker_tests.rs"]
 mod unsupported_marker_tests;
+
+#[cfg(test)]
+#[path = "adjustment_thumb_tests.rs"]
+mod adjustment_thumb_tests;
 
 #[cfg(test)]
 mod lock_tests {
